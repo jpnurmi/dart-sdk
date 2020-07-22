@@ -103,7 +103,7 @@ DART_EXTERN_C Dart_WeakPersistentHandle (*Dart_NewWeakPersistentHandle_DL)(
     Dart_Handle object,
     void* peer,
     intptr_t external_allocation_size,
-    Dart_WeakPersistentHandleFinalizer callback);
+    Dart_HandleFinalizer callback);
 
 DART_EXTERN_C void (*Dart_DeleteWeakPersistentHandle_DL)(
     Dart_WeakPersistentHandle object);

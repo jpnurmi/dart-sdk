@@ -2,8 +2,17 @@
 
 ### Dart VM
 
+*   **Breaking Change** [#42312][]: `Dart_WeakPersistentHandle`s will no longer
+    auto-delete themselves when the referenced object is garbage collected to
+    avoid race conditions, but they are still automatically deleted when the
+    isolate group shuts down.
+*   **Breaking Change** [#42312][]: `Dart_WeakPersistentHandleFinalizer`
+    is renamed to `Dart_HandleFinalizer` and had its `handle` argument removed.
+    All api functions using that type have been updated.
 *   Introduces `Dart_FinalizableHandle`s. They do auto-delete, and the weakly
     referred object cannot be accessed through them.
+
+[#42312]: https://github.com/dart-lang/sdk/issues/42312
 
 ## 2.9.0
 

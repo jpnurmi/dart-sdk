@@ -22032,7 +22032,7 @@ StringPtr String::NewExternal(const uint8_t* characters,
                               intptr_t len,
                               void* peer,
                               intptr_t external_allocation_size,
-                              Dart_WeakPersistentHandleFinalizer callback,
+                              Dart_HandleFinalizer callback,
                               Heap::Space space) {
   return ExternalOneByteString::New(characters, len, peer,
                                     external_allocation_size, callback, space);
@@ -22042,7 +22042,7 @@ StringPtr String::NewExternal(const uint16_t* characters,
                               intptr_t len,
                               void* peer,
                               intptr_t external_allocation_size,
-                              Dart_WeakPersistentHandleFinalizer callback,
+                              Dart_HandleFinalizer callback,
                               Heap::Space space) {
   return ExternalTwoByteString::New(characters, len, peer,
                                     external_allocation_size, callback, space);
@@ -22426,11 +22426,10 @@ void String::ToUTF8(uint8_t* utf8_array, intptr_t array_len) const {
   Utf8::Encode(*this, reinterpret_cast<char*>(utf8_array), array_len);
 }
 
-static FinalizablePersistentHandle* AddFinalizer(
-    const Object& referent,
-    void* peer,
-    Dart_WeakPersistentHandleFinalizer callback,
-    intptr_t external_size) {
+static FinalizablePersistentHandle* AddFinalizer(const Object& referent,
+                                                 void* peer,
+                                                 Dart_HandleFinalizer callback,
+                                                 intptr_t external_size) {
   ASSERT(callback != NULL);
   return FinalizablePersistentHandle::New(Isolate::Current(), referent, peer,
                                           callback, external_size,
@@ -23040,7 +23039,7 @@ ExternalOneByteStringPtr ExternalOneByteString::New(
     intptr_t len,
     void* peer,
     intptr_t external_allocation_size,
-    Dart_WeakPersistentHandleFinalizer callback,
+    Dart_HandleFinalizer callback,
     Heap::Space space) {
   ASSERT(Isolate::Current()->object_store()->external_one_byte_string_class() !=
          Class::null());
@@ -23069,7 +23068,7 @@ ExternalTwoByteStringPtr ExternalTwoByteString::New(
     intptr_t len,
     void* peer,
     intptr_t external_allocation_size,
-    Dart_WeakPersistentHandleFinalizer callback,
+    Dart_HandleFinalizer callback,
     Heap::Space space) {
   ASSERT(Isolate::Current()->object_store()->external_two_byte_string_class() !=
          Class::null());
@@ -23861,7 +23860,7 @@ const char* TypedData::ToCString() const {
 
 FinalizablePersistentHandle* ExternalTypedData::AddFinalizer(
     void* peer,
-    Dart_WeakPersistentHandleFinalizer callback,
+    Dart_HandleFinalizer callback,
     intptr_t external_size) const {
   return dart::AddFinalizer(*this, peer, callback, external_size);
 }
@@ -23899,10 +23898,7 @@ ExternalTypedDataPtr ExternalTypedData::NewFinalizeWithFree(uint8_t* data,
   ExternalTypedData& result = ExternalTypedData::Handle(ExternalTypedData::New(
       kExternalTypedDataUint8ArrayCid, data, len, Heap::kOld));
   result.AddFinalizer(
-      data,
-      [](void* isolate_callback_data, Dart_WeakPersistentHandle handle,
-         void* data) { free(data); },
-      len);
+      data, [](void* isolate_callback_data, void* data) { free(data); }, len);
   return result.raw();
 }
 

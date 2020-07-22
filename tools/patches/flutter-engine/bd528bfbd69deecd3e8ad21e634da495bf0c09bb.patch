@@ -1,0 +1,404 @@
+diff --git a/runtime/dart_isolate.cc b/runtime/dart_isolate.cc
+index 53459a941..86ad773c4 100644
+--- a/runtime/dart_isolate.cc
++++ b/runtime/dart_isolate.cc
+@@ -859,6 +859,11 @@ void DartIsolate::AddIsolateShutdownCallback(const fml::closure& closure) {
+ }
+ 
+ void DartIsolate::OnShutdownCallback() {
++  tonic::DartState* state = tonic::DartState::Current();
++  if (state != nullptr) {
++    state->SetIsShuttingDown();
++  }
++
+   {
+     tonic::DartApiScope api_scope;
+     Dart_Handle sticky_error = Dart_GetStickyError();
+diff --git a/shell/platform/embedder/embedder.cc b/shell/platform/embedder/embedder.cc
+index 6b3fa9cea..d2a004158 100644
+--- a/shell/platform/embedder/embedder.cc
++++ b/shell/platform/embedder/embedder.cc
+@@ -1862,8 +1862,7 @@ FlutterEngineResult FlutterEnginePostDartObject(
+         dart_object.value.as_external_typed_data.data = buffer;
+         dart_object.value.as_external_typed_data.peer = peer;
+         dart_object.value.as_external_typed_data.callback =
+-            +[](void* unused_isolate_callback_data,
+-                Dart_WeakPersistentHandle unused_handle, void* peer) {
++            +[](void* unused_isolate_callback_data, void* peer) {
+               auto typed_peer = reinterpret_cast<ExternalTypedDataPeer*>(peer);
+               typed_peer->trampoline(typed_peer->user_data);
+               delete typed_peer;
+diff --git a/shell/platform/fuchsia/dart_runner/dart_runner.cc b/shell/platform/fuchsia/dart_runner/dart_runner.cc
+index 34d429bc7..6ce1307c9 100644
+--- a/shell/platform/fuchsia/dart_runner/dart_runner.cc
++++ b/shell/platform/fuchsia/dart_runner/dart_runner.cc
+@@ -91,6 +91,10 @@ void IsolateShutdownCallback(void* isolate_group_data, void* isolate_data) {
+     tonic::DartMicrotaskQueue::GetForCurrentThread()->Destroy();
+     async_loop_quit(loop);
+   }
++
++  auto state =
++      static_cast<std::shared_ptr<tonic::DartState>*>(isolate_group_data);
++  state->get()->SetIsShuttingDown();
+ }
+ 
+ void IsolateGroupCleanupCallback(void* isolate_group_data) {
+diff --git a/third_party/tonic/BUILD.gn b/third_party/tonic/BUILD.gn
+index eb0136d54..a23d1ee11 100644
+--- a/third_party/tonic/BUILD.gn
++++ b/third_party/tonic/BUILD.gn
+@@ -29,6 +29,8 @@ source_set("tonic") {
+     "dart_persistent_value.h",
+     "dart_state.cc",
+     "dart_state.h",
++    "dart_weak_persistent_value.cc",
++    "dart_weak_persistent_value.h",
+     "dart_wrappable.cc",
+     "dart_wrappable.h",
+     "dart_wrapper_info.h",
+diff --git a/third_party/tonic/dart_state.cc b/third_party/tonic/dart_state.cc
+index b711a2297..3f37685c5 100644
+--- a/third_party/tonic/dart_state.cc
++++ b/third_party/tonic/dart_state.cc
+@@ -27,7 +27,8 @@ DartState::DartState(int dirfd,
+       message_handler_(new DartMessageHandler()),
+       file_loader_(new FileLoader(dirfd)),
+       message_epilogue_(message_epilogue),
+-      has_set_return_code_(false) {}
++      has_set_return_code_(false),
++      is_shutting_down_(false) {}
+ 
+ DartState::~DartState() {}
+ 
+diff --git a/third_party/tonic/dart_state.h b/third_party/tonic/dart_state.h
+index 845914937..2835e9c41 100644
+--- a/third_party/tonic/dart_state.h
++++ b/third_party/tonic/dart_state.h
+@@ -68,6 +68,9 @@ class DartState : public std::enable_shared_from_this<DartState> {
+   void SetReturnCodeCallback(std::function<void(uint32_t)> callback);
+   bool has_set_return_code() const { return has_set_return_code_; }
+ 
++  void SetIsShuttingDown() { is_shutting_down_ = true; }
++  bool IsShuttingDown() { return is_shutting_down_; }
++
+   virtual void DidSetIsolate();
+ 
+   static Dart_Handle HandleLibraryTag(Dart_LibraryTag tag,
+@@ -83,6 +86,7 @@ class DartState : public std::enable_shared_from_this<DartState> {
+   std::function<void(Dart_Handle)> message_epilogue_;
+   std::function<void(uint32_t)> set_return_code_callback_;
+   bool has_set_return_code_;
++  std::atomic<bool> is_shutting_down_;
+ 
+  protected:
+   TONIC_DISALLOW_COPY_AND_ASSIGN(DartState);
+diff --git a/third_party/tonic/dart_weak_persistent_value.cc b/third_party/tonic/dart_weak_persistent_value.cc
+new file mode 100644
+index 000000000..172e195ab
+--- /dev/null
++++ b/third_party/tonic/dart_weak_persistent_value.cc
+@@ -0,0 +1,63 @@
++// Copyright 2013 The Flutter Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "tonic/dart_weak_persistent_value.h"
++
++#include "tonic/dart_state.h"
++#include "tonic/scopes/dart_isolate_scope.h"
++
++namespace tonic {
++
++DartWeakPersistentValue::DartWeakPersistentValue() : handle_(nullptr) {}
++
++DartWeakPersistentValue::~DartWeakPersistentValue() {
++  Clear();
++}
++
++void DartWeakPersistentValue::Set(DartState* dart_state,
++                                  Dart_Handle object,
++                                  void* peer,
++                                  intptr_t external_allocation_size,
++                                  Dart_HandleFinalizer callback) {
++  TONIC_DCHECK(is_empty());
++  dart_state_ = dart_state->GetWeakPtr();
++  handle_ = Dart_NewWeakPersistentHandle(object, peer, external_allocation_size,
++                                         callback);
++}
++
++void DartWeakPersistentValue::Clear() {
++  if (!handle_) {
++    return;
++  }
++
++  auto dart_state = dart_state_.lock();
++  if (!dart_state) {
++    return;
++  }
++
++  if (!dart_state->IsShuttingDown()) {
++    if (Dart_CurrentIsolateGroup()) {
++      Dart_DeleteWeakPersistentHandle(handle_);
++    } else {
++      DartIsolateScope scope(dart_state->isolate());
++      Dart_DeleteWeakPersistentHandle(handle_);
++    }
++  }
++  // If it's shutting down, the handle will be deleted already.
++
++  dart_state_.reset();
++  handle_ = nullptr;
++}
++
++Dart_Handle DartWeakPersistentValue::Get() {
++  auto dart_state = dart_state_.lock();
++  TONIC_DCHECK(dart_state);
++  TONIC_DCHECK(!dart_state->IsShuttingDown());
++  if (!handle_) {
++    return nullptr;
++  }
++  return Dart_HandleFromWeakPersistent(handle_);
++}
++
++}  // namespace tonic
+diff --git a/third_party/tonic/dart_weak_persistent_value.h b/third_party/tonic/dart_weak_persistent_value.h
+new file mode 100644
+index 000000000..5f8aed5ee
+--- /dev/null
++++ b/third_party/tonic/dart_weak_persistent_value.h
+@@ -0,0 +1,48 @@
++// Copyright 2013 The Flutter Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef LIB_TONIC_DART_WEAK_PERSISTENT_VALUE_H_
++#define LIB_TONIC_DART_WEAK_PERSISTENT_VALUE_H_
++
++#include <memory>
++
++#include "third_party/dart/runtime/include/dart_api.h"
++#include "tonic/common/macros.h"
++
++namespace tonic {
++class DartState;
++
++// DartWeakPersistentValue is a bookkeeping class to help pair calls to
++// Dart_NewWeakPersistentHandle with Dart_DeleteWeakPersistentHandle even in
++// the case if IsolateGroup shutdown. Consider using this class instead of
++// holding a Dart_PersistentHandle directly so that you don't leak the
++// Dart_WeakPersistentHandle.
++class DartWeakPersistentValue {
++ public:
++  DartWeakPersistentValue();
++  ~DartWeakPersistentValue();
++
++  Dart_WeakPersistentHandle value() const { return handle_; }
++  bool is_empty() const { return handle_ == nullptr; }
++
++  void Set(DartState* dart_state,
++           Dart_Handle object,
++           void* peer,
++           intptr_t external_allocation_size,
++           Dart_HandleFinalizer callback);
++  void Clear();
++  Dart_Handle Get();
++
++  const std::weak_ptr<DartState>& dart_state() const { return dart_state_; }
++
++ private:
++  std::weak_ptr<DartState> dart_state_;
++  Dart_WeakPersistentHandle handle_;
++
++  TONIC_DISALLOW_COPY_AND_ASSIGN(DartWeakPersistentValue);
++};
++
++}  // namespace tonic
++
++#endif  // LIB_TONIC_DART_WEAK_PERSISTENT_VALUE_H_
+diff --git a/third_party/tonic/dart_wrappable.cc b/third_party/tonic/dart_wrappable.cc
+index 3bdfe3e6e..858215c11 100644
+--- a/third_party/tonic/dart_wrappable.cc
++++ b/third_party/tonic/dart_wrappable.cc
+@@ -12,12 +12,17 @@
+ namespace tonic {
+ 
+ DartWrappable::~DartWrappable() {
+-  TONIC_CHECK(!dart_wrapper_);
++  // Calls the destructor of dart_wrapper_ to delete WeakPersistentHandle.
+ }
+ 
+ // TODO(dnfield): Delete this. https://github.com/flutter/flutter/issues/50997
+ Dart_Handle DartWrappable::CreateDartWrapper(DartState* dart_state) {
+-  TONIC_DCHECK(!dart_wrapper_);
++  if (!dart_wrapper_.is_empty()) {
++    // Any previously given out wrapper must have been GCed.
++    TONIC_DCHECK(Dart_IsNull(dart_wrapper_.Get()));
++    dart_wrapper_.Clear();
++  }
++
+   const DartWrapperInfo& info = GetDartWrapperInfo();
+ 
+   Dart_PersistentHandle type = dart_state->class_library().GetClass(info);
+@@ -36,14 +41,19 @@ Dart_Handle DartWrappable::CreateDartWrapper(DartState* dart_state) {
+   TONIC_DCHECK(!LogIfError(res));
+ 
+   this->RetainDartWrappableReference();  // Balanced in FinalizeDartWrapper.
+-  dart_wrapper_ = Dart_NewWeakPersistentHandle(
+-      wrapper, this, GetAllocationSize(), &FinalizeDartWrapper);
++  dart_wrapper_.Set(dart_state, wrapper, this, GetAllocationSize(),
++                    &FinalizeDartWrapper);
+ 
+   return wrapper;
+ }
+ 
+ void DartWrappable::AssociateWithDartWrapper(Dart_Handle wrapper) {
+-  TONIC_DCHECK(!dart_wrapper_);
++  if (!dart_wrapper_.is_empty()) {
++    // Any previously given out wrapper must have been GCed.
++    TONIC_DCHECK(Dart_IsNull(dart_wrapper_.Get()));
++    dart_wrapper_.Clear();
++  }
++
+   TONIC_CHECK(!LogIfError(wrapper));
+ 
+   const DartWrapperInfo& info = GetDartWrapperInfo();
+@@ -54,26 +64,25 @@ void DartWrappable::AssociateWithDartWrapper(Dart_Handle wrapper) {
+       wrapper, kWrapperInfoIndex, reinterpret_cast<intptr_t>(&info))));
+ 
+   this->RetainDartWrappableReference();  // Balanced in FinalizeDartWrapper.
+-  dart_wrapper_ = Dart_NewWeakPersistentHandle(
+-      wrapper, this, GetAllocationSize(), &FinalizeDartWrapper);
++
++  DartState* dart_state = DartState::Current();
++  dart_wrapper_.Set(dart_state, wrapper, this, GetAllocationSize(),
++                    &FinalizeDartWrapper);
+ }
+ 
+ void DartWrappable::ClearDartWrapper() {
+-  TONIC_DCHECK(dart_wrapper_);
+-  Dart_Handle wrapper = Dart_HandleFromWeakPersistent(dart_wrapper_);
++  TONIC_DCHECK(!dart_wrapper_.is_empty());
++  Dart_Handle wrapper = dart_wrapper_.Get();
+   TONIC_CHECK(!LogIfError(Dart_SetNativeInstanceField(wrapper, kPeerIndex, 0)));
+   TONIC_CHECK(
+       !LogIfError(Dart_SetNativeInstanceField(wrapper, kWrapperInfoIndex, 0)));
+-  Dart_DeleteWeakPersistentHandle(dart_wrapper_);
+-  dart_wrapper_ = nullptr;
++  dart_wrapper_.Clear();
+   this->ReleaseDartWrappableReference();
+ }
+ 
+ void DartWrappable::FinalizeDartWrapper(void* isolate_callback_data,
+-                                        Dart_WeakPersistentHandle wrapper,
+                                         void* peer) {
+   DartWrappable* wrappable = reinterpret_cast<DartWrappable*>(peer);
+-  wrappable->dart_wrapper_ = nullptr;
+   wrappable->ReleaseDartWrappableReference();  // Balanced in CreateDartWrapper.
+ }
+ 
+diff --git a/third_party/tonic/dart_wrappable.h b/third_party/tonic/dart_wrappable.h
+index 49b0a2c40..8dd875daa 100644
+--- a/third_party/tonic/dart_wrappable.h
++++ b/third_party/tonic/dart_wrappable.h
+@@ -9,6 +9,7 @@
+ #include "tonic/common/macros.h"
+ #include "tonic/converter/dart_converter.h"
+ #include "tonic/dart_state.h"
++#include "tonic/dart_weak_persistent_value.h"
+ #include "tonic/dart_wrapper_info.h"
+ #include "tonic/logging/dart_error.h"
+ 
+@@ -26,7 +27,7 @@ class DartWrappable {
+     kNumberOfNativeFields,
+   };
+ 
+-  DartWrappable() : dart_wrapper_(nullptr) {}
++  DartWrappable() : dart_wrapper_(DartWeakPersistentValue()) {}
+ 
+   // Subclasses that wish to expose a new interface must override this function
+   // and provide information about their wrapper. There is no need to call your
+@@ -49,7 +50,9 @@ class DartWrappable {
+   Dart_Handle CreateDartWrapper(DartState* dart_state);
+   void AssociateWithDartWrapper(Dart_Handle wrappable);
+   void ClearDartWrapper();  // Warning: Might delete this.
+-  Dart_WeakPersistentHandle dart_wrapper() const { return dart_wrapper_; }
++  Dart_WeakPersistentHandle dart_wrapper() const {
++    return dart_wrapper_.value();
++  }
+ 
+  protected:
+   virtual ~DartWrappable();
+@@ -59,11 +62,9 @@ class DartWrappable {
+       const tonic::DartWrapperInfo& wrapper_info);
+ 
+  private:
+-  static void FinalizeDartWrapper(void* isolate_callback_data,
+-                                  Dart_WeakPersistentHandle wrapper,
+-                                  void* peer);
++  static void FinalizeDartWrapper(void* isolate_callback_data, void* peer);
+ 
+-  Dart_WeakPersistentHandle dart_wrapper_;
++  DartWeakPersistentValue dart_wrapper_;
+ 
+   TONIC_DISALLOW_COPY_AND_ASSIGN(DartWrappable);
+ };
+@@ -103,22 +104,36 @@ struct DartConverter<
+     typename std::enable_if<
+         std::is_convertible<T*, const DartWrappable*>::value>::type> {
+   static Dart_Handle ToDart(DartWrappable* val) {
+-    if (!val)
++    if (!val) {
+       return Dart_Null();
+-    if (Dart_WeakPersistentHandle wrapper = val->dart_wrapper())
+-      return Dart_HandleFromWeakPersistent(wrapper);
++    }
++    if (Dart_WeakPersistentHandle wrapper = val->dart_wrapper()) {
++      auto strong_handle = Dart_HandleFromWeakPersistent(wrapper);
++      if (!Dart_IsNull(strong_handle)) {
++        return strong_handle;
++      }
++      // After the weak referenced object has been GCed, the handle points to
++      // Dart_Null(). Fall through create a new wrapper object.
++    }
+     return val->CreateDartWrapper(DartState::Current());
+   }
+ 
+   static void SetReturnValue(Dart_NativeArguments args,
+                              DartWrappable* val,
+                              bool auto_scope = true) {
+-    if (!val)
++    if (!val) {
+       Dart_SetReturnValue(args, Dart_Null());
+-    else if (Dart_WeakPersistentHandle wrapper = val->dart_wrapper())
+-      Dart_SetWeakHandleReturnValue(args, wrapper);
+-    else
+-      Dart_SetReturnValue(args, val->CreateDartWrapper(DartState::Current()));
++      return;
++    } else if (Dart_WeakPersistentHandle wrapper = val->dart_wrapper()) {
++      auto strong_handle = Dart_HandleFromWeakPersistent(wrapper);
++      if (!Dart_IsNull(strong_handle)) {
++        Dart_SetReturnValue(args, strong_handle);
++        return;
++      }
++      // After the weak referenced object has been GCed, the handle points to
++      // Dart_Null(). Fall through create a new wrapper object.
++    }
++    Dart_SetReturnValue(args, val->CreateDartWrapper(DartState::Current()));
+   }
+ 
+   static T* FromDart(Dart_Handle handle) {
+diff --git a/third_party/tonic/typed_data/dart_byte_data.cc b/third_party/tonic/typed_data/dart_byte_data.cc
+index b548b0a9c..06fc7e237 100644
+--- a/third_party/tonic/typed_data/dart_byte_data.cc
++++ b/third_party/tonic/typed_data/dart_byte_data.cc
+@@ -14,9 +14,7 @@ namespace {
+ // with a buffer allocated outside the Dart heap.
+ const int kExternalSizeThreshold = 1000;
+ 
+-void FreeFinalizer(void* isolate_callback_data,
+-                   Dart_WeakPersistentHandle handle,
+-                   void* peer) {
++void FreeFinalizer(void* isolate_callback_data, void* peer) {
+   free(peer);
+ }
+ 
