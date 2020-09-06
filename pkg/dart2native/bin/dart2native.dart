@@ -60,6 +60,14 @@ E.g.: dart2native --packages=/tmp/pkgs main.dart
     ..addOption('save-debugging-info', abbr: 'S', valueHelp: 'path', help: '''
 Remove debugging information from the output and save it separately to the specified file. <path> can be relative or absolute.
 ''')
+    ..addOption('gen-snapshot', valueHelp: 'path', hide: true, help: '''
+Override the gen_snapshot tool. <path> can be relative or absolute.
+E.g.: dart2native main.dart -g /tmp/dart-sdk-simarm/bin/utils/gen_snapshot
+''')
+    ..addOption('aot-runtime', valueHelp: 'path', hide: true, help: '''
+Override the AOT runtime. <path> can be relative or absolute.
+E.g.: dart2native main.dart -r /tmp/dart-sdk-arm/bin/dartaotruntime
+''')
     ..addOption('enable-experiment',
         defaultsTo: '', valueHelp: 'feature', hide: true, help: '''
 Comma separated list of experimental features.
@@ -106,6 +114,8 @@ Comma separated list of experimental features.
         enableExperiment: parsedArgs['enable-experiment'],
         enableAsserts: parsedArgs['enable-asserts'],
         verbose: parsedArgs['verbose'],
+        overrideGenSnapshot: parsedArgs['gen-snapshot'],
+        overrideDartaotruntime: parsedArgs['aot-runtime'],
         extraOptions: parsedArgs['extra-gen-snapshot-options']);
   } catch (e) {
     stderr.writeln('Failed to generate native files:');

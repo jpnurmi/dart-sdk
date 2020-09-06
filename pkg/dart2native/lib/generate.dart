@@ -27,6 +27,8 @@ Future<void> generateNative({
   String enableExperiment = '',
   bool enableAsserts = false,
   bool verbose = false,
+  String overrideGenSnapshot,
+  String overrideDartaotruntime,
   List<String> extraOptions = const [],
 }) async {
   final Directory tempDir = Directory.systemTemp.createTempSync();
@@ -69,8 +71,13 @@ Future<void> generateNative({
     final String snapshotFile = (outputKind == Kind.aot
         ? outputPath
         : path.join(tempDir.path, 'snapshot.aot'));
-    final snapshotResult = await generateAotSnapshot(genSnapshot, kernelFile,
-        snapshotFile, debugPath, enableAsserts, extraOptions);
+    final snapshotResult = await generateAotSnapshot(
+        overrideGenSnapshot ?? genSnapshot,
+        kernelFile,
+        snapshotFile,
+        debugPath,
+        enableAsserts,
+        extraOptions);
     if (snapshotResult.exitCode != 0) {
       stderr.writeln(snapshotResult.stdout);
       stderr.writeln(snapshotResult.stderr);
@@ -82,7 +89,8 @@ Future<void> generateNative({
       if (verbose) {
         print('Generating executable.');
       }
-      await writeAppendedExecutable(dartaotruntime, snapshotFile, outputPath);
+      await writeAppendedExecutable(
+          overrideDartaotruntime ?? dartaotruntime, snapshotFile, outputPath);
 
       if (Platform.isLinux || Platform.isMacOS) {
         if (verbose) {
